@@ -27,10 +27,13 @@ laps_data = load_laps_data()
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
+if not api_key:
+    st.error("API key not found. Please set API_KEY.")
+
 APP_NAME = "streamlit_code_agents"
 USER_ID = "streamlit_user_01"
 SESSION_ID_PREFIX = "pipeline_session_"
-GEMINI_MODEL = "gemini-2.0-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 # ============================================
 # CRITICAL: Initialize ALL session state FIRST
