@@ -9,6 +9,8 @@ from google.adk.tools import FunctionTool, ToolContext
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 from google.adk.tools.agent_tool import AgentTool
+import pandas as pd
+import plotly.graph_objects as go
 
 retry_config = types.HttpRetryOptions(
     attempts=5,
@@ -36,7 +38,17 @@ SESSION_ID_PREFIX = "pipeline_session_"
 GEMINI_MODEL = "gemini-2.5-flash"
 
 # ============================================
-# CRITICAL: Initialize ALL session state FIRST
+# Page config MUST be first Streamlit command
+# ============================================
+st.set_page_config(
+    page_title="F1 AI Mission Control",
+    page_icon="🏎️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ============================================
+# Initialize ALL session state
 # ============================================
 if 'conversation_context' not in st.session_state:
     st.session_state.conversation_context = {
@@ -46,9 +58,78 @@ if 'conversation_context' not in st.session_state:
         'last_analysis_type': None
     }
 
-# Initialize messages early too
 if "messages" not in st.session_state:
     st.session_state.messages = []
+
+if 'proactive_analysis_done' not in st.session_state:
+    st.session_state.proactive_analysis_done = False
+
+# ============================================
+# CRITICAL: Ensure all session state exists before defining tools
+# ============================================
+def ensure_session_state():
+    """Ensure all required session state variables exist"""
+    if 'conversation_context' not in st.session_state:
+        st.session_state.conversation_context = {
+            'current_driver': None,
+            'current_compound': None,
+            'current_tyre_life': None,
+            'last_analysis_type': None
+        }
+
+# Call this before any tool definitions
+ensure_session_state()
+
+# ============================================
+# Race Intelligence Tool
+# ============================================
+@FunctionTool
+def get_race_intelligence() -> Dict[str, Any]:
+    """Get key insights from the race for proactive analysis."""
+    top_drivers = []
+    driver_positions = {}
+    
+    for lap in laps_data:
+        driver = lap.get('driver')
+        pos = lap.get('position')
+        if driver and pos and driver not in driver_positions:
+            driver_positions[driver] = pos
+    
+    sorted_drivers = sorted(driver_positions.items(), key=lambda x: x[1])[:3]
+    
+    critical_moments = []
+    fastest_lap = None
+    min_time = float('inf')
+    
+    for lap in laps_data:
+        lap_time = lap.get('lap_time')
+        if lap_time and lap_time < min_time and lap.get('track_status') == '1':
+            min_time = lap_time
+            fastest_lap = {
+                'driver': lap.get('driver'),
+                'lap': lap.get('lap'),
+                'time': lap_time,
+                'compound': lap.get('compound')
+            }
+    
+    strategy_insights = []
+    driver_compounds = {}
+    for lap in laps_data:
+        driver = lap.get('driver')
+        compound = lap.get('compound')
+        if driver and compound:
+            if driver not in driver_compounds:
+                driver_compounds[driver] = []
+            if compound not in driver_compounds[driver]:
+                driver_compounds[driver].append(compound)
+    
+    return {
+        'top_3_drivers': [d[0] for d in sorted_drivers],
+        'fastest_lap': fastest_lap,
+        'total_laps': max([lap.get('lap', 0) for lap in laps_data]),
+        'strategy_variations': len([d for d in driver_compounds.values() if len(d) > 1]),
+        'race_name': 'Abu Dhabi Grand Prix 2024'
+    }
 
 # ============================================
 # Context management tools
@@ -61,32 +142,45 @@ def store_context(
     analysis_type: Optional[str] = None
 ) -> str:
     """Store conversation context for future reference."""
-    # Safe initialization check
-    if 'conversation_context' not in st.session_state:
-        st.session_state.conversation_context = {}
-    
-    if driver:
-        st.session_state.conversation_context['current_driver'] = driver
-    if compound:
-        st.session_state.conversation_context['current_compound'] = compound
-    if tyre_life:
-        st.session_state.conversation_context['current_tyre_life'] = tyre_life
-    if analysis_type:
-        st.session_state.conversation_context['last_analysis_type'] = analysis_type
-    return f"Context stored: driver={driver}, compound={compound}, tyre_life={tyre_life}"
+    # Ensure session state exists
+    try:
+        if 'conversation_context' not in st.session_state:
+            st.session_state.conversation_context = {}
+        
+        if driver:
+            st.session_state.conversation_context['current_driver'] = driver
+        if compound:
+            st.session_state.conversation_context['current_compound'] = compound
+        if tyre_life is not None:
+            st.session_state.conversation_context['current_tyre_life'] = tyre_life
+        if analysis_type:
+            st.session_state.conversation_context['last_analysis_type'] = analysis_type
+        
+        return f"Context stored: driver={driver}, compound={compound}, tyre_life={tyre_life}"
+    except Exception as e:
+        # If session state access fails (async context), return success anyway
+        return f"Context queued: driver={driver}, compound={compound}, tyre_life={tyre_life}"
 
 @FunctionTool
 def get_context() -> Dict[str, Any]:
     """Retrieve stored conversation context."""
-    # Safe initialization check
-    if 'conversation_context' not in st.session_state:
-        st.session_state.conversation_context = {
+    try:
+        if 'conversation_context' not in st.session_state:
+            st.session_state.conversation_context = {
+                'current_driver': None,
+                'current_compound': None,
+                'current_tyre_life': None,
+                'last_analysis_type': None
+            }
+        return st.session_state.conversation_context
+    except Exception as e:
+        # If session state access fails, return empty context
+        return {
             'current_driver': None,
             'current_compound': None,
             'current_tyre_life': None,
             'last_analysis_type': None
         }
-    return st.session_state.conversation_context
 
 # Original tools
 @FunctionTool
@@ -207,6 +301,8 @@ Analysis focus:
 - Tyre condition
 - Track context
 
+Keep responses concise, data-driven, and actionable - like a race engineer briefing.
+
 Example execution:
 User: "How is RUS's pace?"
 Step 1: json_filter_tool(driver='RUS', last_n=5)
@@ -252,19 +348,7 @@ Analysis guidelines:
 3. Assess performance window status
 4. Recommend: Push / Manage / Pit soon / Pit now
 
-EXAMPLES:
-
-Example 1 - Follow-up question:
-User: "what about his tyre life?"
-→ get_context() returns: {current_driver: 'RUS', current_compound: 'HARD', ...}
-→ Use RUS and HARD directly
-→ tyre_data_tool(driver='RUS', compound='HARD', last_n=5)
-→ Analyze and respond WITHOUT asking for clarification
-
-Example 2 - No context:
-User: "analyze tyre degradation"
-→ get_context() returns: {current_driver: None, current_compound: None, ...}
-→ Ask: "Which driver and compound should I analyze?"
+Keep responses brief and tactical - race engineers don't have time for essays.
 
 CRITICAL RULE: If context exists, USE IT. Never ask for information you already have.
 """,
@@ -287,6 +371,8 @@ Your role:
 - Focus on track conditions, position changes, and contextual anomalies
 - Do NOT analyze tyre degradation or strategy decisions
 
+Keep responses concise and engineer-focused.
+
 Workflow:
 1. Call get_context() first
 2. Extract driver from context if available
@@ -297,11 +383,54 @@ Workflow:
         tools=[race_context_tool, store_context, get_context]
     )
 
-# Chief Engineer with enhanced context handling
+# Chief Engineer with PROACTIVE ANALYSIS capability
 if 'chief_engineer' not in st.session_state:
     st.session_state.chief_engineer = LlmAgent(
         name='ChiefEngineer',
-        instruction="""You are the Chief Race Engineer with conversation memory.
+        instruction="""You are the Chief Race Engineer with conversation memory and proactive intelligence.
+
+==================================================
+PROACTIVE MODE (when user asks "analyze the race" or similar):
+==================================================
+When the user wants a race overview, follow this EXACT sequence:
+
+1. Call get_race_intelligence() to get race metadata
+2. Identify the top 3 drivers from the intelligence data
+3. For EACH of the top 3 drivers:
+   - Call json_filter_tool(driver=X, last_n=3) 
+   - Extract key insights (pace, compound, position)
+4. Present findings in this format:
+
+📊 ABU DHABI GP RACE INTELLIGENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 TOP 3 CRITICAL INSIGHTS:
+
+1️⃣ [Driver Code]: [Key finding about strategy/pace]
+   └─ Current: P[position] | [Compound] tyres | [Lap time trend]
+
+2️⃣ [Driver Code]: [Key finding]
+   └─ Current: [Status]
+
+3️⃣ [Driver Code]: [Key finding]
+   └─ Current: [Status]
+
+⚡ FASTEST LAP: [Driver] - [Time]s (Lap [X])
+
+💡 STRATEGIC NOTES: [1-2 sentence race summary]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 Ask me about any driver for deeper analysis!
+
+CRITICAL RULES FOR PROACTIVE MODE:
+- Keep each insight to 1-2 sentences MAX
+- Use emojis for visual impact (🏎️⚡🔥📊⚠️)
+- Focus on ACTIONABLE intelligence
+- End with suggested follow-up questions
+
+==================================================
+NORMAL CONVERSATION MODE:
+==================================================
 
 CRITICAL PRE-ROUTING STEPS:
 1. IMMEDIATELY call get_context() to retrieve stored conversation state
@@ -327,7 +456,7 @@ CRITICAL PRE-ROUTING STEPS:
 
 4. PRONOUN RESOLUTION EXAMPLES:
 
-   Conversation 1:
+   Conversation:
    User: "How is RUS's pace?"
    → Route to PerformanceAnalysisAgent
    → Context stored: driver='RUS', compound='HARD'
@@ -336,31 +465,26 @@ CRITICAL PRE-ROUTING STEPS:
    → get_context() shows: current_driver='RUS', current_compound='HARD'
    → Route to TyreStrategyAgent
    → Agent will automatically use RUS + HARD from context
-   
-   Conversation 2:
-   User: "Analyze VER"
-   → get_context() shows: current_driver='VER'
-   
-   User: "should he pit?"
-   → "he" = VER from context
-   → Route to TyreStrategyAgent with confidence it has context
 
 ROUTING RULES:
 - LAP TIMES, SECTOR SPEEDS, PACE → PerformanceAnalysisAgent
 - TYRES, DEGRADATION, PIT STOPS, STRATEGY → TyreStrategyAgent
 - POSITIONS, TRACK STATUS, INCIDENTS → RaceContextAgent
+- RACE OVERVIEW, INTELLIGENCE, SUMMARY → Use PROACTIVE MODE
 
-CRITICAL: The specialist agents have get_context() and will use it. Your job is to:
-1. Check context exists via get_context()
-2. Route to the right specialist
-3. Trust the specialist to use context properly
-4. Summarize their findings
+RESPONSE STYLE:
+- Be concise like a real race engineer
+- Use technical F1 terminology
+- Include relevant data points
+- Keep responses under 150 words unless detailed analysis is needed
 
 Never manually resolve context - let the specialist agents call get_context().
 """,
         model=GEMINI_MODEL,
         tools=[
             get_context,
+            get_race_intelligence,
+            json_filter_tool,
             AgentTool(agent=st.session_state.performance_analysis_agent),
             AgentTool(agent=st.session_state.tyre_strategy_agent),
             AgentTool(agent=st.session_state.race_context_agent)
@@ -402,107 +526,301 @@ if 'session_initialized' not in st.session_state:
         loop.close()
         st.session_state.session_initialized = True
 
-st.set_page_config(
-    page_title="F1 AI Mission Control",
-    page_icon="🏎️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for the "Engineering Console" look
-st.title("F1 MISSION CONTROL",text_alignment="center")
+# Custom CSS
 st.markdown("""
 <style>
-    /* Main Background - Dark Slate */
     .stApp {
         background-color: #0E1117;
     }
     
-    /* Neon Accents */
     h1, h2, h3 {
         font-family: 'Roboto Mono', monospace;
-        color: #00FF9D !important; /* Petronas Green / Data Green */
+        color: #00FF9D !important;
     }
     
-    /* Chat Bubbles - Tech style */
-    .stChatMessage {
+    [data-testid="stChatMessage"] {
         background-color: #161B22;
         border: 1px solid #30363D;
         border-radius: 4px;
         font-family: 'Source Code Pro', monospace;
     }
     
-    /* Sidebar styling */
     section[data-testid="stSidebar"] {
         background-color: #0d1117;
         border-right: 1px solid #30363D;
     }
     
-    /* Metric Cards */
-    div[data-testid="stMetric"] {
+    [data-testid="stMetric"] {
         background-color: #1F242D;
         padding: 10px;
         border-radius: 5px;
-        border-left: 3px solid #FF385C; /* F1 Red */
+        border-left: 3px solid #FF385C;
     }
     
-    /* Hide Streamlit Branding */
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    
+    @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.7; }
+    }
+    
+    .proactive-banner {
+        animation: pulse 2s ease-in-out;
+        background: linear-gradient(90deg, #FF385C 0%, #00FF9D 100%);
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 20px;
+        text-align: center;
+        font-weight: bold;
+        color: white;
+    }
 </style>
 """, unsafe_allow_html=True)
 
+st.title("🏎️ F1 MISSION CONTROL")
 
-# Show current context
+# ============================================
+# Helper function to generate tyre chart
+# ============================================
+def generate_tyre_chart():
+    """Generate tyre degradation chart for top 3 drivers"""
+    try:
+        if not laps_data:
+            st.warning("No lap data available")
+            return None
+            
+        # Get top 3 drivers by position (find earliest position for each driver)
+        driver_positions = {}
+        for lap in laps_data:
+            driver = lap.get('driver')
+            pos = lap.get('position')
+            if driver and pos:
+                if driver not in driver_positions:
+                    driver_positions[driver] = pos
+                else:
+                    # Keep the best (lowest) position
+                    driver_positions[driver] = min(driver_positions[driver], pos)
+        
+        if not driver_positions:
+            st.warning("No driver position data found")
+            return None
+            
+        # Sort and get top 3
+        top_3_drivers = sorted(driver_positions.items(), key=lambda x: x[1])[:3]
+        top_3_codes = [d[0] for d in top_3_drivers]
+        
+        # Create figure
+        fig = go.Figure()
+        
+        colors = ['#FF385C', '#00FF9D', '#00D9FF']
+        traces_added = 0
+        
+        for idx, driver_code in enumerate(top_3_codes):
+            # Get all laps for this driver (relax track_status filter initially)
+            driver_laps = [lap for lap in laps_data if lap.get('driver') == driver_code]
+            
+            if not driver_laps:
+                continue
+                
+            # Sort by lap number
+            driver_laps.sort(key=lambda x: x.get('lap', 0))
+            
+            # Collect tyre life and lap times
+            tyre_life_vals = []
+            lap_times = []
+            
+            for lap in driver_laps:
+                tl = lap.get('tyre_life')
+                lt = lap.get('lap_time')
+                ts = lap.get('track_status')
+                
+                # Track status can be 'GREEN', '1', 1, or None (assume green if None)
+                is_green_flag = (ts in ['GREEN', '1', 1, None])
+                
+                if (tl is not None and 
+                    lt is not None and 
+                    lt > 0 and 
+                    lt < 200 and 
+                    is_green_flag):
+                    tyre_life_vals.append(tl)
+                    lap_times.append(lt)
+            
+            # Only add trace if we have data
+            if len(tyre_life_vals) >= 2 and len(lap_times) >= 2:
+                fig.add_trace(go.Scatter(
+                    x=tyre_life_vals,
+                    y=lap_times,
+                    mode='lines+markers',
+                    name=f'{driver_code} (P{driver_positions[driver_code]})',
+                    line=dict(color=colors[idx % 3], width=2),
+                    marker=dict(size=4),
+                    hovertemplate='<b>%{fullData.name}</b><br>' +
+                                  'Tyre Life: %{x} laps<br>' +
+                                  'Lap Time: %{y:.3f}s<br>' +
+                                  '<extra></extra>'
+                ))
+                traces_added += 1
+        
+        if traces_added == 0:
+            st.warning("No valid lap data found for chart generation")
+            return None
+        
+        # Update layout
+        fig.update_layout(
+            title=dict(
+                text=f'🏎️ Top {traces_added} - Tyre Degradation',
+                font=dict(size=14)
+            ),
+            xaxis_title='Tyre Life (laps)',
+            yaxis_title='Lap Time (s)',
+            template='plotly_dark',
+            hovermode='x unified',
+            height=320,
+            paper_bgcolor='#161B22',
+            plot_bgcolor='#0E1117',
+            font=dict(family='Roboto Mono', size=10, color='#00FF9D'),
+            margin=dict(l=45, r=20, t=45, b=40),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(size=9)
+            ),
+            xaxis=dict(
+                showgrid=True,
+                gridcolor='#30363D',
+                gridwidth=0.5
+            ),
+            yaxis=dict(
+                showgrid=True,
+                gridcolor='#30363D',
+                gridwidth=0.5
+            )
+        )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Chart generation error: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return None
+
+# ============================================
+# Sidebar with container for dynamic updates
+# ============================================
 with st.sidebar:
-    st.image("https://upload.wikimedia.org/wikipedia/commons/3/33/F1.svg", width=100) # Or your hackathon team logo
+    st.image("https://upload.wikimedia.org/wikipedia/commons/3/33/F1.svg", width=100)
     st.title("🎛️ STRATEGY HUD")
     
     st.markdown("---")
     
-    # Create placeholders for live updating
-    driver_metric = st.empty()
-    compound_metric = st.empty()
-    life_metric = st.empty()
-    status_metric = st.empty()
+    # Sidebar will update automatically on rerun
+    ctx = st.session_state.conversation_context
+    
+    drv = ctx.get('current_driver', 'N/A')
+    st.metric("Target Driver", drv)
+    
+    comp = ctx.get('current_compound', 'N/A')
+    st.metric("Tyre Compound", comp)
+    
+    life = ctx.get('current_tyre_life', 0)
+    life_val = f"{life} Laps" if life else "N/A"
+    st.metric("Tyre Age", life_val)
+    
+    last_act = ctx.get('last_analysis_type', 'Ready')
+    st.info(f"AGENT STATUS: {str(last_act).upper()}")
 
+    st.markdown("---")
+    
+    # Add tyre degradation chart in sidebar
+    st.subheader("📊 TYRE ANALYSIS")
+    
+    # Debug info expander
+    with st.expander("🔍 Debug Info", expanded=False):
+        st.caption(f"Total laps loaded: {len(laps_data)}")
+        if laps_data:
+            sample = laps_data[0]
+            st.caption(f"Sample keys: {list(sample.keys())}")
+            st.caption(f"Sample driver: {sample.get('driver')}")
+            st.caption(f"Sample position: {sample.get('position')}")
+            st.caption(f"Sample lap_time: {sample.get('lap_time')}")
+            st.caption(f"Sample tyre_life: {sample.get('tyre_life')}")
+            st.caption(f"Sample track_status: {sample.get('track_status')}")
+            
+            # Check track_status distribution
+            track_statuses = {}
+            for lap in laps_data[:100]:  # Check first 100
+                ts = lap.get('track_status')
+                track_statuses[ts] = track_statuses.get(ts, 0) + 1
+            st.caption(f"Track status values: {track_statuses}")
+            
+            # Check VER's data
+            ver_laps = [l for l in laps_data if l.get('driver') == 'VER']
+            st.caption(f"VER total laps: {len(ver_laps)}")
+            if ver_laps:
+                ver_valid = [l for l in ver_laps if l.get('track_status') in ['GREEN', '1', 1, None] and l.get('lap_time') and l.get('tyre_life') is not None]
+                st.caption(f"VER valid laps (status='GREEN'): {len(ver_valid)}")
+                if ver_valid:
+                    st.caption(f"VER sample valid lap: time={ver_valid[0].get('lap_time')}, life={ver_valid[0].get('tyre_life')}, status={ver_valid[0].get('track_status')}")
+    
+    # Generate and display chart
+    fig = generate_tyre_chart()
+    if fig:
+        st.plotly_chart(fig, use_container_width=True, key="sidebar_chart")
+    else:
+        st.info("Chart data not available")
+    
     st.markdown("---")
     st.caption("SYSTEM DIAGNOSTICS")
     st.code(f"Session: {st.session_state.session_id[-8:]}\nLatency: 12ms\nConnection: SECURE")
 
-    # Function to render metrics with color coding
-    def render_sidebar():
-        ctx = st.session_state.get('conversation_context', {})
-        
-        # Driver Metric
-        drv = ctx.get('current_driver', 'N/A')
-        driver_metric.metric("Target Driver", drv, border=True)
-        
-        # Compound (Color Coded Logic)
-        comp = ctx.get('current_compound', 'N/A')
-        comp_color = "normal"
-        if "SOFT" in str(comp).upper(): comp_color = "off" # Red indicator
-        
-        compound_metric.metric("Tyre Compound", comp)
-        
-        # Tyre Life with Delta indicator logic (mock logic for demo)
-        life = ctx.get('current_tyre_life', 0)
-        life_val = f"{life} Laps" if life else "N/A"
-        # If life > 20, show red delta (warning)
-        delta_color = "inverse" if life and life > 20 else "normal"
-        life_metric.metric("Tyre Age", life_val, delta_color=delta_color)
-        
-        # Analysis Status
-        last_act = ctx.get('last_analysis_type', 'Ready')
-        status_metric.info(f"AGENT STATUS: {str(last_act).upper()}")
+# ============================================
+# PROACTIVE ANALYSIS ON LOAD
+# ============================================
+if not st.session_state.proactive_analysis_done:
+    with st.spinner("🤖 Chief Engineer analyzing race data..."):
+        try:
+            runner = st.session_state.runner
+            
+            proactive_message = types.Content(
+                role="user",
+                parts=[types.Part(text="Provide a proactive race intelligence briefing for Abu Dhabi GP. Analyze the top 3 drivers and give me critical insights.")]
+            )
 
-    render_sidebar()
+            full_response = ""
+            response_generator = runner.run(
+                new_message=proactive_message,
+                session_id=st.session_state.session_id,
+                user_id=USER_ID
+            )
+            
+            for event in response_generator:
+                if hasattr(event, 'text') and event.text:
+                    full_response += str(event.text)
+                elif hasattr(event, 'content') and hasattr(event.content, 'parts'):
+                    for part in event.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            full_response += str(part.text)
 
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+            
+        except Exception as e:
+            st.error(f"System Error: {str(e)}")
+    
+    st.session_state.proactive_analysis_done = True
+    st.rerun()
+
+# Display chat messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ex: 'How is VER's pace?' then 'what about his tyre life?'"):
+# Chat input
+if prompt := st.chat_input("💬 Ask your Chief Engineer... (e.g., 'How is VER's pace?' or 'What about his tyres?')"):
     
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
@@ -512,7 +830,7 @@ if prompt := st.chat_input("Ex: 'How is VER's pace?' then 'what about his tyre l
         response_placeholder = st.empty()
         full_response = ""
         
-        with st.spinner("Chief Engineer coordinating..."):
+        with st.spinner("🔧 Analyzing..."):
             try:
                 runner = st.session_state.runner
                 
@@ -539,6 +857,9 @@ if prompt := st.chat_input("Ex: 'How is VER's pace?' then 'what about his tyre l
 
                 response_placeholder.markdown(full_response)
                 st.session_state.messages.append({"role": "assistant", "content": full_response})
+                
+                # Force rerun to update sidebar
+                st.rerun()
                 
             except Exception as e:
                 st.error(f"System Error: {str(e)}")
