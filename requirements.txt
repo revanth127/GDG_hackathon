@@ -1,6 +1,14 @@
+<<<<<<< HEAD
 streamlit
 google-generativeai
 google-adk
 python-dotenv
 requests
 ploty
+=======
+streamlit
+google-generativeai
+google-adk
+python-dotenv
+requests
+>>>>>>> b39cb722f5245af6ed12420bb9f94c698c46b708
