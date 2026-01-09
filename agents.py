@@ -35,7 +35,7 @@ if not api_key:
 APP_NAME = "streamlit_code_agents"
 USER_ID = "streamlit_user_01"
 SESSION_ID_PREFIX = "pipeline_session_"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 
 # ============================================
 # Page config MUST be first Streamlit command
